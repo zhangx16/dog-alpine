@@ -1,23 +1,31 @@
 # dog-alpine
 
-Alpine Linux 端口流量统计与限额暂停脚本。
+Alpine / Debian 通用的端口流量统计与限额暂停脚本。
 
 核心功能：使用 `nftables` 按端口统计 TCP/UDP 入站、出站、总流量；可为端口设置总流量限额，当该端口 `IN + OUT` 达到限额后，自动暂停该端口流量。
 
+## 支持系统
+
+- Alpine Linux，OpenRC
+- Debian / Ubuntu，systemd
+- Debian 系 SysV init 环境，使用 `update-rc.d`
+
+> 依赖：`nftables`。一键脚本会自动安装 `nftables`、`ca-certificates`、`curl`。
+
 ## 功能
 
-- 支持 Alpine Linux / BusyBox `/bin/sh`
+- 使用 `/bin/sh`，兼容 BusyBox ash 和 Debian dash
 - 使用 `nftables` 计数器统计流量
 - 使用 `nftables quota` 实现内核级自动暂停，无需常驻轮询进程
 - 支持 TCP / UDP
 - 支持单端口和端口段，例如 `80`、`443`、`10000-10100`
 - 支持 `input` / `output` / `forward` 链统计
-- 支持 OpenRC 开机自动恢复规则
+- 支持 OpenRC、systemd、SysV init 开机自动恢复规则
 - 不依赖 `bash`、`jq`、`bc`
 
 ## 一键安装
 
-在 Alpine 服务器上使用 `root` 执行：
+使用 `root` 执行：
 
 ```sh
 wget -qO- https://raw.githubusercontent.com/zhangx16/dog-alpine/main/install.sh | sh
@@ -25,8 +33,18 @@ wget -qO- https://raw.githubusercontent.com/zhangx16/dog-alpine/main/install.sh 
 
 如果系统没有 `wget`，可以使用：
 
+Alpine：
+
 ```sh
 apk add --no-cache curl
+curl -fsSL https://raw.githubusercontent.com/zhangx16/dog-alpine/main/install.sh | sh
+```
+
+Debian / Ubuntu：
+
+```sh
+apt-get update
+apt-get install -y ca-certificates curl
 curl -fsSL https://raw.githubusercontent.com/zhangx16/dog-alpine/main/install.sh | sh
 ```
 
@@ -56,16 +74,40 @@ wget -qO- https://raw.githubusercontent.com/zhangx16/dog-alpine/main/install.sh 
 
 ## 手动安装
 
-```sh
-apk add --no-cache nftables
+Alpine：
 
+```sh
+apk add --no-cache nftables ca-certificates curl
+```
+
+Debian / Ubuntu：
+
+```sh
+apt-get update
+apt-get install -y --no-install-recommends nftables ca-certificates curl
+```
+
+下载脚本：
+
+```sh
 wget -O /usr/local/bin/port-traffic-stat \
   https://raw.githubusercontent.com/zhangx16/dog-alpine/main/port-traffic-stat.sh
 
 chmod +x /usr/local/bin/port-traffic-stat
+```
 
+安装开机服务并恢复规则：
+
+```sh
 port-traffic-stat install-service
 port-traffic-stat restore
+```
+
+Debian / Ubuntu systemd 可选启动命令：
+
+```sh
+systemctl daemon-reload
+systemctl enable --now port-traffic-stat
 ```
 
 ## 基础使用
@@ -228,7 +270,29 @@ TOTAL                    1.70GB         4.90GB         6.60GB
 /etc/port-traffic-stat/state
 /etc/port-traffic-stat/limits
 /etc/port-traffic-stat/used
-/etc/init.d/port-traffic-stat
+/etc/init.d/port-traffic-stat                    # Alpine OpenRC 或 Debian SysV
+/etc/systemd/system/port-traffic-stat.service    # Debian/Ubuntu systemd
+```
+
+## Debian 注意事项
+
+Debian 默认也可以使用 `nftables`。如果系统同时运行其他防火墙管理器，例如 `ufw`、`firewalld` 或自定义 `/etc/nftables.conf`，本脚本会创建独立表：
+
+```text
+inet port_traffic_stat
+```
+
+不会修改系统已有防火墙表。若其他服务在运行中执行 `nft flush ruleset`，需要重新执行：
+
+```sh
+port-traffic-stat restore
+```
+
+或启用开机服务：
+
+```sh
+port-traffic-stat install-service
+systemctl enable --now port-traffic-stat
 ```
 
 ## 常见问题
@@ -251,11 +315,18 @@ port-traffic-stat restore
 
 ### 重启后统计规则消失
 
-安装 OpenRC 服务：
+Alpine / OpenRC：
 
 ```sh
 port-traffic-stat install-service
 rc-service port-traffic-stat start
+```
+
+Debian / systemd：
+
+```sh
+port-traffic-stat install-service
+systemctl start port-traffic-stat
 ```
 
 ### 达到限额后如何恢复端口流量

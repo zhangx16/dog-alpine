@@ -1,5 +1,6 @@
 #!/bin/sh
 # One-click installer for zhangx16/dog-alpine.
+# Supports Alpine Linux and Debian/Ubuntu.
 
 set -eu
 
@@ -21,6 +22,7 @@ die() {
 usage() {
     cat <<EOF
 dog-alpine one-click installer
+Supports Alpine Linux and Debian/Ubuntu.
 
 Usage:
   sh install.sh [options] [ports...]
@@ -35,7 +37,7 @@ Examples:
 Options:
   --limit SIZE    Set total IN+OUT traffic limit for each installed port
   --no-deps       Do not install nftables/curl packages
-  --no-service    Do not install OpenRC/systemd startup service
+  --no-service    Do not install OpenRC/systemd/SysV startup service
   --branch NAME   Download from another Git branch
   --url URL       Download port-traffic-stat.sh from a custom URL
   -h, --help      Show this help
@@ -67,7 +69,7 @@ install_deps() {
 
     if has apt-get; then
         apt-get update
-        apt-get install -y nftables ca-certificates curl
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nftables ca-certificates curl
         return 0
     fi
 

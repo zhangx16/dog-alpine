@@ -1,10 +1,10 @@
 #!/bin/sh
 # port-traffic-stat.sh
-# Alpine-friendly nftables port traffic statistics with optional per-port quota blocking.
+# Alpine/Debian-friendly nftables port traffic statistics with optional per-port quota blocking.
 
 set -eu
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 FAMILY="inet"
 TABLE="port_traffic_stat"
 CONFIG_DIR="${PTS_CONFIG_DIR:-/etc/port-traffic-stat}"
@@ -743,14 +743,14 @@ cmd_install_deps() {
     fi
 
     if command -v apk >/dev/null 2>&1; then
-        apk add --no-cache nftables
+        apk add --no-cache nftables ca-certificates curl
     elif command -v apt-get >/dev/null 2>&1; then
         apt-get update
-        apt-get install -y nftables
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nftables ca-certificates curl
     elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y nftables
+        dnf install -y nftables ca-certificates curl
     elif command -v yum >/dev/null 2>&1; then
-        yum install -y nftables
+        yum install -y nftables ca-certificates curl
     else
         die "unknown package manager, please install nftables manually"
     fi
@@ -796,7 +796,8 @@ EOF
         cat > /etc/systemd/system/port-traffic-stat.service <<'EOF'
 [Unit]
 Description=Restore and save port traffic nftables counters and quotas
-After=network-pre.target
+Wants=network-pre.target
+After=nftables.service network-pre.target
 
 [Service]
 Type=oneshot
@@ -807,13 +808,59 @@ ExecStop=/usr/local/bin/port-traffic-stat save
 [Install]
 WantedBy=multi-user.target
 EOF
-        systemctl daemon-reload
-        systemctl enable port-traffic-stat.service
-        echo "systemd service installed: port-traffic-stat.service"
+        if systemctl daemon-reload >/dev/null 2>&1; then
+            systemctl enable port-traffic-stat.service >/dev/null 2>&1 || true
+            echo "systemd service installed: port-traffic-stat.service"
+            echo "start now: systemctl start port-traffic-stat"
+        else
+            echo "systemd service file written: /etc/systemd/system/port-traffic-stat.service"
+            echo "systemctl is not available in this environment; enable it later with:"
+            echo "  systemctl daemon-reload && systemctl enable --now port-traffic-stat"
+        fi
         return 0
     fi
 
-    die "OpenRC/systemd not found"
+    if command -v update-rc.d >/dev/null 2>&1 && [ -d /etc/init.d ]; then
+        cat > /etc/init.d/port-traffic-stat <<'EOF'
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          port-traffic-stat
+# Required-Start:    $local_fs $network
+# Required-Stop:     $local_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Restore and save port traffic nftables counters and quotas
+### END INIT INFO
+
+case "$1" in
+    start)
+        /usr/local/bin/port-traffic-stat restore >/dev/null 2>&1
+        ;;
+    stop)
+        /usr/local/bin/port-traffic-stat save >/dev/null 2>&1
+        ;;
+    restart|reload|force-reload)
+        /usr/local/bin/port-traffic-stat save >/dev/null 2>&1 || true
+        /usr/local/bin/port-traffic-stat restore >/dev/null 2>&1
+        ;;
+    status)
+        /usr/local/bin/port-traffic-stat status
+        ;;
+    *)
+        echo "Usage: /etc/init.d/port-traffic-stat {start|stop|restart|reload|force-reload|status}"
+        exit 1
+        ;;
+esac
+
+exit $?
+EOF
+        chmod +x /etc/init.d/port-traffic-stat
+        update-rc.d port-traffic-stat defaults >/dev/null 2>&1 || true
+        echo "SysV init service installed: port-traffic-stat"
+        return 0
+    fi
+
+    die "OpenRC/systemd/SysV init not found"
 }
 
 cmd_uninstall() {
@@ -821,13 +868,16 @@ cmd_uninstall() {
     cmd_flush || true
     if command -v rc-update >/dev/null 2>&1 && [ -f /etc/init.d/port-traffic-stat ]; then
         rc-update del port-traffic-stat default >/dev/null 2>&1 || true
-        rm -f /etc/init.d/port-traffic-stat
     fi
     if command -v systemctl >/dev/null 2>&1 && [ -f /etc/systemd/system/port-traffic-stat.service ]; then
         systemctl disable port-traffic-stat.service >/dev/null 2>&1 || true
         rm -f /etc/systemd/system/port-traffic-stat.service
         systemctl daemon-reload >/dev/null 2>&1 || true
     fi
+    if command -v update-rc.d >/dev/null 2>&1 && [ -f /etc/init.d/port-traffic-stat ]; then
+        update-rc.d -f port-traffic-stat remove >/dev/null 2>&1 || true
+    fi
+    rm -f /etc/init.d/port-traffic-stat
     rm -f /usr/local/bin/port-traffic-stat
     echo "uninstalled program and startup service; data kept in: $CONFIG_DIR"
 }
@@ -835,6 +885,10 @@ cmd_uninstall() {
 usage() {
     cat <<EOF
 port-traffic-stat v$VERSION
+
+Supported systems:
+  Alpine Linux with OpenRC
+  Debian/Ubuntu with systemd or SysV init
 
 Usage:
   $0 install-deps
