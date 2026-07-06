@@ -1,10 +1,10 @@
 #!/bin/sh
-# One-click installer for zhangx16/dog-alpine.
+# One-click installer for zhangx16/traffic-dog.
 # Supports Alpine Linux and Debian/Ubuntu.
 
 set -eu
 
-REPO="${REPO:-zhangx16/dog-alpine}"
+REPO="${REPO:-zhangx16/traffic-dog}"
 BRANCH="${BRANCH:-main}"
 RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/$REPO/$BRANCH}"
 SCRIPT_URL="${SCRIPT_URL:-$RAW_BASE/port-traffic-stat.sh}"
@@ -20,12 +20,12 @@ die() {
 }
 
 log() {
-    echo "[dog-alpine] $*"
+    echo "[traffic-dog] $*"
 }
 
 usage() {
     cat <<EOF
-dog-alpine one-click installer
+traffic-dog one-click installer
 Supports Alpine Linux and Debian/Ubuntu.
 
 Usage:
@@ -177,8 +177,8 @@ parse_args() {
 }
 
 main() {
-    log "installer started"
     parse_args "$@"
+    log "installer started"
     need_root
 
     if [ "$INSTALL_DEPS" = "1" ]; then

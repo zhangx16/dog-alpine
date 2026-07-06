@@ -14,7 +14,7 @@ STATE_FILE="$CONFIG_DIR/state"
 LIMITS_FILE="$CONFIG_DIR/limits"
 USED_FILE="$CONFIG_DIR/used"
 LOCK_DIR="/tmp/port-traffic-stat.lock"
-UPDATE_URL="${PTS_UPDATE_URL:-https://raw.githubusercontent.com/zhangx16/dog-alpine/main/port-traffic-stat.sh}"
+UPDATE_URL="${PTS_UPDATE_URL:-https://raw.githubusercontent.com/zhangx16/traffic-dog/main/port-traffic-stat.sh}"
 
 umask 022
 

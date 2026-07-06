@@ -29,7 +29,7 @@ Alpine / Debian 通用的端口流量统计与限额暂停脚本。
 使用 `root` 执行：
 
 ```sh
-wget -O- https://raw.githubusercontent.com/zhangx16/dog-alpine/main/install.sh | sh
+wget -O- https://raw.githubusercontent.com/zhangx16/traffic-dog/main/install.sh | sh
 ```
 
 如果系统没有 `wget`，可以使用：
@@ -38,7 +38,7 @@ Alpine：
 
 ```sh
 apk add --no-cache curl
-curl -fL https://raw.githubusercontent.com/zhangx16/dog-alpine/main/install.sh | sh
+curl -fL https://raw.githubusercontent.com/zhangx16/traffic-dog/main/install.sh | sh
 ```
 
 Debian / Ubuntu：
@@ -46,31 +46,31 @@ Debian / Ubuntu：
 ```sh
 apt-get update
 apt-get install -y ca-certificates curl
-curl -fL https://raw.githubusercontent.com/zhangx16/dog-alpine/main/install.sh | sh
+curl -fL https://raw.githubusercontent.com/zhangx16/traffic-dog/main/install.sh | sh
 ```
 
 一键安装并添加统计端口：
 
 ```sh
-wget -O- https://raw.githubusercontent.com/zhangx16/dog-alpine/main/install.sh | sh -s -- 80 443
+wget -O- https://raw.githubusercontent.com/zhangx16/traffic-dog/main/install.sh | sh -s -- 80 443
 ```
 
 一键安装、添加端口，并给每个端口设置 10G 总流量限额：
 
 ```sh
-wget -O- https://raw.githubusercontent.com/zhangx16/dog-alpine/main/install.sh | sh -s -- --limit 10G 80 443
+wget -O- https://raw.githubusercontent.com/zhangx16/traffic-dog/main/install.sh | sh -s -- --limit 10G 80 443
 ```
 
 端口段示例：
 
 ```sh
-wget -O- https://raw.githubusercontent.com/zhangx16/dog-alpine/main/install.sh | sh -s -- --limit 500M 10000-10100
+wget -O- https://raw.githubusercontent.com/zhangx16/traffic-dog/main/install.sh | sh -s -- --limit 500M 10000-10100
 ```
 
 不安装开机服务：
 
 ```sh
-wget -O- https://raw.githubusercontent.com/zhangx16/dog-alpine/main/install.sh | sh -s -- --no-service 80 443
+wget -O- https://raw.githubusercontent.com/zhangx16/traffic-dog/main/install.sh | sh -s -- --no-service 80 443
 ```
 
 ## 手动安装
@@ -92,7 +92,7 @@ apt-get install -y --no-install-recommends nftables ca-certificates curl
 
 ```sh
 wget -O /usr/local/bin/port-traffic-stat \
-  https://raw.githubusercontent.com/zhangx16/dog-alpine/main/port-traffic-stat.sh
+  https://raw.githubusercontent.com/zhangx16/traffic-dog/main/port-traffic-stat.sh
 
 chmod +x /usr/local/bin/port-traffic-stat
 ```
@@ -346,13 +346,13 @@ systemctl enable --now port-traffic-stat
 不要使用静默参数 `wget -qO-`，下载失败时它可能不显示任何错误。请使用：
 
 ```sh
-wget -O- https://raw.githubusercontent.com/zhangx16/dog-alpine/main/install.sh | sh
+wget -O- https://raw.githubusercontent.com/zhangx16/traffic-dog/main/install.sh | sh
 ```
 
 或：
 
 ```sh
-curl -fL https://raw.githubusercontent.com/zhangx16/dog-alpine/main/install.sh | sh
+curl -fL https://raw.githubusercontent.com/zhangx16/traffic-dog/main/install.sh | sh
 ```
 
 安装后检查：
@@ -368,7 +368,7 @@ port-traffic-stat version
 说明当前目录没有脚本文件。推荐直接使用一键安装：
 
 ```sh
-wget -O- https://raw.githubusercontent.com/zhangx16/dog-alpine/main/install.sh | sh
+wget -O- https://raw.githubusercontent.com/zhangx16/traffic-dog/main/install.sh | sh
 ```
 
 ### rules not loaded
