@@ -7,6 +7,7 @@ set -eu
 REPO="${REPO:-zhangx16/traffic-dog}"
 BRANCH="${BRANCH:-main}"
 RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/$REPO/$BRANCH}"
+CDN_BASE="${CDN_BASE:-https://cdn.jsdelivr.net/gh/$REPO@$BRANCH}"
 SCRIPT_URL="${SCRIPT_URL:-$RAW_BASE/port-traffic-stat.sh}"
 INSTALL_PATH="${INSTALL_PATH:-/usr/local/bin/port-traffic-stat}"
 INSTALL_DEPS=1
@@ -52,6 +53,7 @@ Size examples:
 Environment:
   REPO=owner/repo
   BRANCH=main
+  CDN_BASE=https://cdn.jsdelivr.net/gh/owner/repo@main
   SCRIPT_URL=https://...
   INSTALL_PATH=/usr/local/bin/port-traffic-stat
 EOF
@@ -109,9 +111,41 @@ download_file() {
 
 validate_downloaded_script() {
     file=$1
-    [ -s "$file" ] || die "downloaded script is empty; check network/DNS access to raw.githubusercontent.com"
-    grep -q 'port-traffic-stat' "$file" || die "downloaded file does not look like port-traffic-stat.sh"
-    /bin/sh -n "$file" || die "downloaded script has syntax errors"
+    [ -s "$file" ] || {
+        echo "downloaded script is empty" >&2
+        return 1
+    }
+    grep -q 'port-traffic-stat' "$file" || {
+        echo "downloaded file does not look like port-traffic-stat.sh" >&2
+        return 1
+    }
+    /bin/sh -n "$file" || {
+        echo "downloaded script has syntax errors" >&2
+        return 1
+    }
+    return 0
+}
+
+download_script_with_fallback() {
+    primary=$1
+    dest=$2
+    fallback="$CDN_BASE/port-traffic-stat.sh"
+
+    rm -f "$dest"
+    log "downloading: $primary"
+    if download_file "$primary" "$dest" && validate_downloaded_script "$dest"; then
+        return 0
+    fi
+
+    if [ "$primary" != "$fallback" ]; then
+        rm -f "$dest"
+        log "primary download failed, trying CDN: $fallback"
+        if download_file "$fallback" "$dest" && validate_downloaded_script "$dest"; then
+            return 0
+        fi
+    fi
+
+    die "failed to download a valid port-traffic-stat.sh; try setting SCRIPT_URL manually"
 }
 
 for_each_port_arg() {
@@ -145,6 +179,7 @@ parse_args() {
                 [ "$#" -gt 0 ] || die "--branch requires a value"
                 BRANCH=$1
                 RAW_BASE="https://raw.githubusercontent.com/$REPO/$BRANCH"
+                CDN_BASE="https://cdn.jsdelivr.net/gh/$REPO@$BRANCH"
                 SCRIPT_URL="$RAW_BASE/port-traffic-stat.sh"
                 shift
                 ;;
@@ -189,9 +224,7 @@ main() {
     tmp="${TMPDIR:-/tmp}/port-traffic-stat.$$"
     trap 'rm -f "$tmp" 2>/dev/null || true' EXIT INT TERM
 
-    log "downloading: $SCRIPT_URL"
-    download_file "$SCRIPT_URL" "$tmp"
-    validate_downloaded_script "$tmp"
+    download_script_with_fallback "$SCRIPT_URL" "$tmp"
 
     mkdir -p "$(dirname "$INSTALL_PATH")"
     cp "$tmp" "$INSTALL_PATH"

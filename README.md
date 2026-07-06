@@ -32,6 +32,12 @@ Alpine / Debian 通用的端口流量统计与限额暂停脚本。
 wget -O- https://raw.githubusercontent.com/zhangx16/traffic-dog/main/install.sh | sh
 ```
 
+如果 GitHub raw 返回 `429 Too Many Requests`，使用 CDN 备用安装：
+
+```sh
+wget -O- https://cdn.jsdelivr.net/gh/zhangx16/traffic-dog@main/install.sh | sh
+```
+
 如果系统没有 `wget`，可以使用：
 
 Alpine：
@@ -41,12 +47,24 @@ apk add --no-cache curl
 curl -fL https://raw.githubusercontent.com/zhangx16/traffic-dog/main/install.sh | sh
 ```
 
+CDN 备用：
+
+```sh
+curl -fL https://cdn.jsdelivr.net/gh/zhangx16/traffic-dog@main/install.sh | sh
+```
+
 Debian / Ubuntu：
 
 ```sh
 apt-get update
 apt-get install -y ca-certificates curl
 curl -fL https://raw.githubusercontent.com/zhangx16/traffic-dog/main/install.sh | sh
+```
+
+CDN 备用：
+
+```sh
+curl -fL https://cdn.jsdelivr.net/gh/zhangx16/traffic-dog@main/install.sh | sh
 ```
 
 一键安装并添加统计端口：
@@ -353,6 +371,12 @@ wget -O- https://raw.githubusercontent.com/zhangx16/traffic-dog/main/install.sh 
 
 ```sh
 curl -fL https://raw.githubusercontent.com/zhangx16/traffic-dog/main/install.sh | sh
+```
+
+如果提示 `429 Too Many Requests`，说明 GitHub raw 对当前 IP 限流，改用 CDN：
+
+```sh
+wget -O- https://cdn.jsdelivr.net/gh/zhangx16/traffic-dog@main/install.sh | sh
 ```
 
 安装后检查：

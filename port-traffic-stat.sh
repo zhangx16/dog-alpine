@@ -5,7 +5,7 @@
 set -eu
 set -f
 
-VERSION="1.3.1"
+VERSION="1.3.2"
 FAMILY="inet"
 TABLE="port_traffic_stat"
 CONFIG_DIR="${PTS_CONFIG_DIR:-/etc/port-traffic-stat}"
@@ -15,6 +15,7 @@ LIMITS_FILE="$CONFIG_DIR/limits"
 USED_FILE="$CONFIG_DIR/used"
 LOCK_DIR="/tmp/port-traffic-stat.lock"
 UPDATE_URL="${PTS_UPDATE_URL:-https://raw.githubusercontent.com/zhangx16/traffic-dog/main/port-traffic-stat.sh}"
+UPDATE_FALLBACK_URL="${PTS_UPDATE_FALLBACK_URL:-https://cdn.jsdelivr.net/gh/zhangx16/traffic-dog@main/port-traffic-stat.sh}"
 
 umask 022
 
@@ -783,15 +784,25 @@ cmd_update() {
     tmp="${TMPDIR:-/tmp}/port-traffic-stat.update.$$"
     trap 'rm -f "$tmp" 2>/dev/null || true' EXIT INT TERM
 
-    if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "$url?ts=$(date +%s)" -o "$tmp"
-    elif command -v wget >/dev/null 2>&1; then
-        wget -qO "$tmp" "$url?ts=$(date +%s)"
-    else
-        die "curl/wget not found, run: $0 install-deps"
-    fi
+    updated=0
+    for candidate in "$url" "$UPDATE_FALLBACK_URL"; do
+        [ -n "$candidate" ] || continue
+        [ "$updated" = "0" ] || break
+        rm -f "$tmp"
+        echo "downloading: $candidate"
+        if command -v curl >/dev/null 2>&1; then
+            curl -fL "$candidate?ts=$(date +%s)" -o "$tmp" || continue
+        elif command -v wget >/dev/null 2>&1; then
+            wget -O "$tmp" "$candidate?ts=$(date +%s)" || continue
+        else
+            die "curl/wget not found, run: $0 install-deps"
+        fi
+        [ -s "$tmp" ] || continue
+        /bin/sh -n "$tmp" || continue
+        updated=1
+    done
 
-    /bin/sh -n "$tmp" || die "downloaded script syntax check failed"
+    [ "$updated" = "1" ] || die "failed to download a valid update"
     cp "$tmp" "$dest"
     chmod +x "$dest"
     echo "updated: $dest"
