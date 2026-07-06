@@ -1,16 +1,17 @@
 #!/bin/sh
 # port-traffic-stat.sh
-# 端口流量统计脚本：使用 nftables 统计指定端口的入站/出站字节数。
-# 兼容 Alpine Linux / BusyBox ash；不依赖 bash、jq、bc。
+# Alpine-friendly nftables port traffic statistics with optional per-port quota blocking.
 
 set -eu
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 FAMILY="inet"
 TABLE="port_traffic_stat"
 CONFIG_DIR="${PTS_CONFIG_DIR:-/etc/port-traffic-stat}"
 PORTS_FILE="$CONFIG_DIR/ports"
 STATE_FILE="$CONFIG_DIR/state"
+LIMITS_FILE="$CONFIG_DIR/limits"
+USED_FILE="$CONFIG_DIR/used"
 LOCK_DIR="/tmp/port-traffic-stat.lock"
 
 umask 022
@@ -21,11 +22,11 @@ die() {
 }
 
 need_root() {
-    [ "$(id -u)" = "0" ] || die "请使用 root 运行"
+    [ "$(id -u)" = "0" ] || die "please run as root"
 }
 
 need_nft() {
-    command -v nft >/dev/null 2>&1 || die "找不到 nft 命令，请先运行：$0 install-deps"
+    command -v nft >/dev/null 2>&1 || die "nft not found, run: $0 install-deps"
 }
 
 now_iso() {
@@ -36,7 +37,7 @@ with_lock() {
     i=0
     while ! mkdir "$LOCK_DIR" 2>/dev/null; do
         i=$((i + 1))
-        [ "$i" -le 30 ] || die "获取锁失败：$LOCK_DIR"
+        [ "$i" -le 30 ] || die "failed to acquire lock: $LOCK_DIR"
         sleep 1
     done
     trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
@@ -46,12 +47,8 @@ ensure_files() {
     mkdir -p "$CONFIG_DIR"
     [ -f "$PORTS_FILE" ] || : > "$PORTS_FILE"
     [ -f "$STATE_FILE" ] || : > "$STATE_FILE"
-}
-
-strip_leading_zero() {
-    n=$(printf '%s' "$1" | sed 's/^0*//')
-    [ -n "$n" ] || n=0
-    printf '%s\n' "$n"
+    [ -f "$LIMITS_FILE" ] || : > "$LIMITS_FILE"
+    [ -f "$USED_FILE" ] || : > "$USED_FILE"
 }
 
 is_uint() {
@@ -59,6 +56,12 @@ is_uint() {
         ''|*[!0-9]*) return 1 ;;
         *) return 0 ;;
     esac
+}
+
+strip_leading_zero() {
+    n=$(printf '%s' "$1" | sed 's/^0*//')
+    [ -n "$n" ] || n=0
+    printf '%s\n' "$n"
 }
 
 validate_port_part() {
@@ -90,11 +93,10 @@ normalize_port_spec() {
 }
 
 split_port_args() {
-    # 支持：80 443 10000-10100 或 80,443,10000-10100
     for arg in "$@"; do
         printf '%s\n' "$arg" | tr ',' '\n' | while IFS= read -r item; do
             [ -n "$item" ] || continue
-            normalize_port_spec "$item" || die "端口格式无效：$item"
+            normalize_port_spec "$item" || die "invalid port: $item"
         done
     done
 }
@@ -111,6 +113,99 @@ counter_out() {
     printf 'p_%s_out\n' "$(safe_name "$1")"
 }
 
+quota_name() {
+    printf 'q_%s_total\n' "$(safe_name "$1")"
+}
+
+read_kv2() {
+    file=$1
+    key=$2
+    if [ -f "$file" ]; then
+        awk -v k="$key" '$1 == k { print $2; found=1; exit } END { if (!found) print "" }' "$file"
+    else
+        echo ""
+    fi
+}
+
+set_kv2() {
+    file=$1
+    key=$2
+    val=$3
+    tmp="$file.$$"
+    [ -f "$file" ] || : > "$file"
+    awk -v k="$key" '$1 != k { print }' "$file" > "$tmp"
+    printf '%s %s\n' "$key" "$val" >> "$tmp"
+    mv "$tmp" "$file"
+}
+
+remove_kv2() {
+    file=$1
+    key=$2
+    tmp="$file.$$"
+    [ -f "$file" ] || return 0
+    awk -v k="$key" '$1 != k { print }' "$file" > "$tmp"
+    mv "$tmp" "$file"
+}
+
+limit_get_bytes() {
+    read_kv2 "$LIMITS_FILE" "$1"
+}
+
+limit_set_bytes() {
+    set_kv2 "$LIMITS_FILE" "$1" "$2"
+}
+
+limit_remove() {
+    remove_kv2 "$LIMITS_FILE" "$1"
+    remove_kv2 "$USED_FILE" "$1"
+}
+
+used_get_bytes() {
+    read_kv2 "$USED_FILE" "$1"
+}
+
+used_set_bytes() {
+    set_kv2 "$USED_FILE" "$1" "$2"
+}
+
+used_remove() {
+    remove_kv2 "$USED_FILE" "$1"
+}
+
+parse_size_to_bytes() {
+    val=$(printf '%s' "$1" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
+    [ -n "$val" ] || return 1
+    awk -v s="$val" '
+    BEGIN {
+        if (s !~ /^[0-9]+([.][0-9]+)?(B|K|KB|KIB|M|MB|MIB|G|GB|GIB|T|TB|TIB|P|PB|PIB)?$/) exit 1
+        num=s
+        sub(/[A-Z]+$/, "", num)
+        unit=s
+        sub(/^[0-9.]+/, "", unit)
+        mult=1
+        if (unit=="K" || unit=="KB" || unit=="KIB") mult=1024
+        else if (unit=="M" || unit=="MB" || unit=="MIB") mult=1024*1024
+        else if (unit=="G" || unit=="GB" || unit=="GIB") mult=1024*1024*1024
+        else if (unit=="T" || unit=="TB" || unit=="TIB") mult=1024*1024*1024*1024
+        else if (unit=="P" || unit=="PB" || unit=="PIB") mult=1024*1024*1024*1024*1024
+        bytes=num*mult
+        if (bytes < 1) exit 1
+        printf "%.0f\n", bytes
+    }'
+}
+
+human_bytes() {
+    awk -v b="${1:-0}" '
+    function human(x, unit, i) {
+        split("B KB MB GB TB PB EB", unit, " ")
+        i=1
+        while (x >= 1024 && i < 7) { x = x / 1024; i++ }
+        if (i == 1) printf "%.0f%s", x, unit[i]
+        else printf "%.2f%s", x, unit[i]
+    }
+    BEGIN { human(b) }'
+}
+
 add_table_and_chains() {
     nft list table "$FAMILY" "$TABLE" >/dev/null 2>&1 || nft add table "$FAMILY" "$TABLE"
     nft list chain "$FAMILY" "$TABLE" input >/dev/null 2>&1 || \
@@ -119,24 +214,6 @@ add_table_and_chains() {
         nft add chain "$FAMILY" "$TABLE" output "{ type filter hook output priority 0; policy accept; }"
     nft list chain "$FAMILY" "$TABLE" forward >/dev/null 2>&1 || \
         nft add chain "$FAMILY" "$TABLE" forward "{ type filter hook forward priority 0; policy accept; }"
-}
-
-add_rules_for_port() {
-    p=$1
-    cin=$(counter_in "$p")
-    cout=$(counter_out "$p")
-
-    nft add counter "$FAMILY" "$TABLE" "$cin" >/dev/null 2>&1 || true
-    nft add counter "$FAMILY" "$TABLE" "$cout" >/dev/null 2>&1 || true
-
-    for proto in tcp udp; do
-        # 入站：发往本机服务端口，或经本机转发到该端口。
-        nft add rule "$FAMILY" "$TABLE" input "$proto" dport "$p" counter name "$cin"
-        nft add rule "$FAMILY" "$TABLE" forward "$proto" dport "$p" counter name "$cin"
-        # 出站：本机服务端口返回给客户端，或经本机转发的返回方向。
-        nft add rule "$FAMILY" "$TABLE" output "$proto" sport "$p" counter name "$cout"
-        nft add rule "$FAMILY" "$TABLE" forward "$proto" sport "$p" counter name "$cout"
-    done
 }
 
 read_state_line() {
@@ -174,6 +251,28 @@ counter_bytes() {
         awk '{ for (i=1; i<=NF; i++) if ($i == "bytes") { print $(i+1); found=1; exit } } END { if (!found) print 0 }'
 }
 
+quota_used_bytes() {
+    q=$1
+    nft list quota "$FAMILY" "$TABLE" "$q" 2>/dev/null | awk '
+    function mult(u) {
+        if (u == "bytes") return 1
+        if (u == "kbytes") return 1024
+        if (u == "mbytes") return 1024*1024
+        if (u == "gbytes") return 1024*1024*1024
+        return 1
+    }
+    {
+        for (i=1; i<=NF; i++) {
+            if ($i == "used") {
+                printf "%.0f\n", ($(i+1) * mult($(i+2)))
+                found=1
+                exit
+            }
+        }
+    }
+    END { if (!found) print "" }'
+}
+
 port_delta_bytes() {
     p=$1
     cin=$(counter_in "$p")
@@ -181,6 +280,104 @@ port_delta_bytes() {
     in_delta=$(counter_bytes "$cin")
     out_delta=$(counter_bytes "$cout")
     echo "$in_delta $out_delta"
+}
+
+port_state_total() {
+    p=$1
+    set -- $(read_state_line "$p")
+    base_in=${1:-0}
+    base_out=${2:-0}
+    set -- $(port_delta_bytes "$p")
+    delta_in=${1:-0}
+    delta_out=${2:-0}
+    echo "$((base_in + delta_in + base_out + delta_out))"
+}
+
+port_saved_total() {
+    p=$1
+    set -- $(read_state_line "$p")
+    base_in=${1:-0}
+    base_out=${2:-0}
+    echo "$((base_in + base_out))"
+}
+
+port_quota_used_live_or_saved() {
+    p=$1
+    q=$(quota_name "$p")
+    live=$(quota_used_bytes "$q")
+    if [ -n "$live" ]; then
+        echo "$live"
+        return 0
+    fi
+    saved=$(used_get_bytes "$p")
+    if [ -n "$saved" ]; then
+        echo "$saved"
+        return 0
+    fi
+    port_state_total "$p"
+}
+
+port_effective_used() {
+    p=$1
+    total=$(port_state_total "$p")
+    used=$(port_quota_used_live_or_saved "$p")
+    if [ -n "$used" ] && [ "$used" -gt "$total" ]; then
+        echo "$used"
+    else
+        echo "$total"
+    fi
+}
+
+add_quota_for_port() {
+    p=$1
+    limit=$(limit_get_bytes "$p")
+    [ -n "$limit" ] || return 0
+
+    q=$(quota_name "$p")
+    used=$(used_get_bytes "$p")
+    if [ -z "$used" ]; then
+        set -- $(read_state_line "$p")
+        used=$((${1:-0} + ${2:-0}))
+    fi
+
+    nft add quota "$FAMILY" "$TABLE" "$q" "{ over $limit bytes used $used bytes; }"
+}
+
+add_limit_drop_rules_for_port() {
+    p=$1
+    limit=$(limit_get_bytes "$p")
+    [ -n "$limit" ] || return 0
+
+    q=$(quota_name "$p")
+    for proto in tcp udp; do
+        nft add rule "$FAMILY" "$TABLE" input "$proto" dport "$p" quota name "$q" drop
+        nft add rule "$FAMILY" "$TABLE" forward "$proto" dport "$p" quota name "$q" drop
+        nft add rule "$FAMILY" "$TABLE" output "$proto" sport "$p" quota name "$q" drop
+        nft add rule "$FAMILY" "$TABLE" forward "$proto" sport "$p" quota name "$q" drop
+    done
+}
+
+add_count_rules_for_port() {
+    p=$1
+    cin=$(counter_in "$p")
+    cout=$(counter_out "$p")
+
+    nft add counter "$FAMILY" "$TABLE" "$cin" >/dev/null 2>&1 || true
+    nft add counter "$FAMILY" "$TABLE" "$cout" >/dev/null 2>&1 || true
+
+    for proto in tcp udp; do
+        nft add rule "$FAMILY" "$TABLE" input "$proto" dport "$p" counter name "$cin"
+        nft add rule "$FAMILY" "$TABLE" forward "$proto" dport "$p" counter name "$cin"
+        nft add rule "$FAMILY" "$TABLE" output "$proto" sport "$p" counter name "$cout"
+        nft add rule "$FAMILY" "$TABLE" forward "$proto" sport "$p" counter name "$cout"
+    done
+}
+
+add_rules_for_port() {
+    p=$1
+    add_quota_for_port "$p"
+    add_limit_drop_rules_for_port "$p"
+    add_count_rules_for_port "$p"
 }
 
 save_port_snapshot() {
@@ -198,6 +395,20 @@ save_port_snapshot() {
     total_in=$((base_in + delta_in))
     total_out=$((base_out + delta_out))
     set_state_line "$p" "$total_in" "$total_out" "$reset_at"
+
+    limit=$(limit_get_bytes "$p")
+    if [ -n "$limit" ]; then
+        q=$(quota_name "$p")
+        q_used=$(quota_used_bytes "$q")
+        split_total=$((total_in + total_out))
+        if [ -n "$q_used" ] && [ "$q_used" -gt "$split_total" ]; then
+            used_set_bytes "$p" "$q_used"
+        else
+            used_set_bytes "$p" "$split_total"
+        fi
+    else
+        used_remove "$p"
+    fi
 }
 
 save_all_snapshots() {
@@ -224,16 +435,19 @@ rebuild_nft_rules() {
     done < "$PORTS_FILE"
 }
 
-human_bytes() {
-    awk -v b="${1:-0}" '
-    function human(x, unit, i) {
-        split("B KB MB GB TB PB EB", unit, " ")
-        i=1
-        while (x >= 1024 && i < 7) { x = x / 1024; i++ }
-        if (i == 1) printf "%.0f%s", x, unit[i]
-        else printf "%.2f%s", x, unit[i]
-    }
-    BEGIN { human(b) }'
+limit_state_for_port() {
+    p=$1
+    limit=$(limit_get_bytes "$p")
+    if [ -z "$limit" ]; then
+        echo "OPEN"
+        return 0
+    fi
+    used=$(port_effective_used "$p")
+    if [ "$used" -ge "$limit" ]; then
+        echo "PAUSED"
+    else
+        echo "LIMITED"
+    fi
 }
 
 print_status() {
@@ -241,18 +455,18 @@ print_status() {
     need_nft
 
     if ! nft list table "$FAMILY" "$TABLE" >/dev/null 2>&1; then
-        echo "nftables 规则未加载。请运行：$0 restore"
+        echo "nftables rules are not loaded. Run: $0 restore"
         exit 1
     fi
 
     count=$(awk 'NF { n++ } END { print n+0 }' "$PORTS_FILE")
     [ "$count" -gt 0 ] || {
-        echo "暂无统计端口。添加示例：$0 add 80 443"
+        echo "No ports. Example: $0 add 80 443"
         return 0
     }
 
-    printf '%-16s %14s %14s %14s  %s\n' "PORT" "IN" "OUT" "TOTAL" "RESET_AT"
-    printf '%-16s %14s %14s %14s  %s\n' "----------------" "--------------" "--------------" "--------------" "------------------------"
+    printf '%-16s %14s %14s %14s %14s  %-8s %s\n' "PORT" "IN" "OUT" "TOTAL" "LIMIT" "STATE" "RESET_AT"
+    printf '%-16s %14s %14s %14s %14s  %-8s %s\n' "----------------" "--------------" "--------------" "--------------" "--------------" "--------" "------------------------"
 
     grand_in=0
     grand_out=0
@@ -273,8 +487,17 @@ print_status() {
         grand_in=$((grand_in + inb))
         grand_out=$((grand_out + outb))
 
-        printf '%-16s %14s %14s %14s  %s\n' \
-            "$p" "$(human_bytes "$inb")" "$(human_bytes "$outb")" "$(human_bytes "$total")" "$reset_at"
+        limit=$(limit_get_bytes "$p")
+        if [ -n "$limit" ]; then
+            limit_text=$(human_bytes "$limit")
+            state=$(limit_state_for_port "$p")
+        else
+            limit_text="-"
+            state="OPEN"
+        fi
+
+        printf '%-16s %14s %14s %14s %14s  %-8s %s\n' \
+            "$p" "$(human_bytes "$inb")" "$(human_bytes "$outb")" "$(human_bytes "$total")" "$limit_text" "$state" "$reset_at"
     done < "$PORTS_FILE"
 
     grand_total=$((grand_in + grand_out))
@@ -283,7 +506,7 @@ print_status() {
 }
 
 cmd_add() {
-    [ "$#" -ge 1 ] || die "用法：$0 add 80 443 10000-10100"
+    [ "$#" -ge 1 ] || die "usage: $0 add 80 443 10000-10100"
     need_root
     need_nft
     with_lock
@@ -293,11 +516,11 @@ cmd_add() {
     ports_list=$(split_port_args "$@")
     for p in $ports_list; do
         if grep -qxF "$p" "$PORTS_FILE" 2>/dev/null; then
-            echo "已存在：$p"
+            echo "exists: $p"
         else
             printf '%s\n' "$p" >> "$PORTS_FILE"
             set_state_line "$p" 0 0 "$(now_iso)"
-            echo "已添加：$p"
+            echo "added: $p"
         fi
     done
 
@@ -305,11 +528,11 @@ cmd_add() {
     sort -u "$PORTS_FILE" > "$sort_tmp"
     mv "$sort_tmp" "$PORTS_FILE"
     rebuild_nft_rules
-    echo "规则已加载。查看：$0 status"
+    echo "rules loaded. View: $0 status"
 }
 
 cmd_del() {
-    [ "$#" -ge 1 ] || die "用法：$0 del 80 443"
+    [ "$#" -ge 1 ] || die "usage: $0 del 80 443"
     need_root
     need_nft
     with_lock
@@ -325,13 +548,120 @@ cmd_del() {
             awk -v x="$p" '$1 != x { print }' "$tmp" > "$tmp.new"
             mv "$tmp.new" "$tmp"
             remove_state_line "$p"
-            echo "已删除：$p"
+            limit_remove "$p"
+            echo "deleted: $p"
         else
-            echo "不存在：$p"
+            echo "not found: $p"
         fi
     done
 
     mv "$tmp" "$PORTS_FILE"
+    rebuild_nft_rules
+}
+
+cmd_limit() {
+    sub=${1:-list}
+
+    case "$sub" in
+        list|show)
+            ensure_files
+            if [ ! -s "$LIMITS_FILE" ]; then
+                echo "No limits. Example: $0 limit 80 10G"
+                return 0
+            fi
+            printf '%-16s %14s %14s %-8s\n' "PORT" "USED" "LIMIT" "STATE"
+            printf '%-16s %14s %14s %-8s\n' "----------------" "--------------" "--------------" "--------"
+            while read -r p limit; do
+                [ -n "${p:-}" ] || continue
+                used=$(port_effective_used "$p" 2>/dev/null || used_get_bytes "$p")
+                [ -n "$used" ] || used=0
+                state=$(limit_state_for_port "$p" 2>/dev/null || echo "LIMITED")
+                printf '%-16s %14s %14s %-8s\n' "$p" "$(human_bytes "$used")" "$(human_bytes "$limit")" "$state"
+            done < "$LIMITS_FILE"
+            ;;
+        set)
+            shift
+            [ "$#" -eq 2 ] || die "usage: $0 limit set PORT SIZE"
+            cmd_limit "$@"
+            ;;
+        del|delete|remove|off|unset)
+            shift
+            [ "$#" -ge 1 ] || die "usage: $0 limit del PORT [PORT...]"
+            need_root
+            need_nft
+            with_lock
+            ensure_files
+            save_all_snapshots
+            ports_list=$(split_port_args "$@")
+            for p in $ports_list; do
+                limit_remove "$p"
+                echo "limit removed: $p"
+            done
+            rebuild_nft_rules
+            ;;
+        *)
+            [ "$#" -eq 2 ] || die "usage: $0 limit PORT SIZE | $0 limit del PORT | $0 limit list"
+            p=$(normalize_port_spec "$1") || die "invalid port: $1"
+            size=$(parse_size_to_bytes "$2") || die "invalid size: $2 (examples: 500M, 10G, 1T)"
+            need_root
+            need_nft
+            with_lock
+            ensure_files
+            if ! grep -qxF "$p" "$PORTS_FILE" 2>/dev/null; then
+                printf '%s\n' "$p" >> "$PORTS_FILE"
+                set_state_line "$p" 0 0 "$(now_iso)"
+                sort_tmp="$PORTS_FILE.sort.$$"
+                sort -u "$PORTS_FILE" > "$sort_tmp"
+                mv "$sort_tmp" "$PORTS_FILE"
+                echo "added: $p"
+            fi
+            save_all_snapshots
+            used=$(port_saved_total "$p")
+            saved_used=$(used_get_bytes "$p")
+            if [ -n "$saved_used" ] && [ "$saved_used" -gt "$used" ]; then
+                used=$saved_used
+            fi
+            limit_set_bytes "$p" "$size"
+            used_set_bytes "$p" "$used"
+            rebuild_nft_rules
+            echo "limit set: $p => $(human_bytes "$size")"
+            if [ "$used" -ge "$size" ]; then
+                echo "current usage is already over limit; port is paused now."
+            fi
+            ;;
+    esac
+}
+
+cmd_unlimit() {
+    [ "$#" -ge 1 ] || die "usage: $0 unlimit PORT [PORT...]"
+    cmd_limit del "$@"
+}
+
+cmd_resume() {
+    target=${1:-all}
+    need_root
+    need_nft
+    with_lock
+    ensure_files
+
+    if [ "$target" = "all" ]; then
+        while IFS= read -r p; do
+            [ -n "$p" ] || continue
+            set_state_line "$p" 0 0 "$(now_iso)"
+            used_set_bytes "$p" 0
+        done < "$PORTS_FILE"
+        rebuild_nft_rules
+        echo "resumed all limited ports; usage has been reset."
+        return 0
+    fi
+
+    ports_list=$(split_port_args "$@")
+    for p in $ports_list; do
+        grep -qxF "$p" "$PORTS_FILE" 2>/dev/null || die "port not added: $p"
+        set_state_line "$p" 0 0 "$(now_iso)"
+        used_set_bytes "$p" 0
+        echo "resumed: $p"
+    done
     rebuild_nft_rules
 }
 
@@ -346,17 +676,21 @@ cmd_reset() {
         while IFS= read -r p; do
             [ -n "$p" ] || continue
             set_state_line "$p" 0 0 "$(now_iso)"
+            used_set_bytes "$p" 0
         done < "$PORTS_FILE"
         rebuild_nft_rules
-        echo "已清零全部端口统计。"
+        echo "reset all stats."
         return 0
     fi
 
-    p=$(normalize_port_spec "$target") || die "端口格式无效：$target"
-    grep -qxF "$p" "$PORTS_FILE" 2>/dev/null || die "端口未添加：$p"
-    set_state_line "$p" 0 0 "$(now_iso)"
+    ports_list=$(split_port_args "$@")
+    for p in $ports_list; do
+        grep -qxF "$p" "$PORTS_FILE" 2>/dev/null || die "port not added: $p"
+        set_state_line "$p" 0 0 "$(now_iso)"
+        used_set_bytes "$p" 0
+        echo "reset: $p"
+    done
     rebuild_nft_rules
-    echo "已清零端口统计：$p"
 }
 
 cmd_restore() {
@@ -365,7 +699,7 @@ cmd_restore() {
     with_lock
     ensure_files
     rebuild_nft_rules
-    echo "已恢复 nftables 统计规则。"
+    echo "restored nftables rules."
 }
 
 cmd_save() {
@@ -375,22 +709,23 @@ cmd_save() {
     ensure_files
     save_all_snapshots
     rebuild_nft_rules
-    echo "已保存当前计数到：$STATE_FILE"
+    echo "saved current counters to: $STATE_FILE"
 }
 
 cmd_flush() {
     need_root
     need_nft
     with_lock
+    ensure_files
     save_all_snapshots
     nft delete table "$FAMILY" "$TABLE" >/dev/null 2>&1 || true
-    echo "已卸载 nftables 规则，历史统计已保存。"
+    echo "flushed nftables rules; historical stats saved."
 }
 
 cmd_watch() {
     interval=${1:-2}
     case "$interval" in
-        ''|*[!0-9]*) die "刷新间隔必须是秒数" ;;
+        ''|*[!0-9]*) die "interval must be seconds" ;;
     esac
     while :; do
         clear 2>/dev/null || true
@@ -403,7 +738,7 @@ cmd_watch() {
 cmd_install_deps() {
     need_root
     if command -v nft >/dev/null 2>&1; then
-        echo "nftables 已安装：$(command -v nft)"
+        echo "nftables is installed: $(command -v nft)"
         return 0
     fi
 
@@ -417,7 +752,7 @@ cmd_install_deps() {
     elif command -v yum >/dev/null 2>&1; then
         yum install -y nftables
     else
-        die "未识别包管理器，请手动安装 nftables"
+        die "unknown package manager, please install nftables manually"
     fi
 }
 
@@ -427,8 +762,7 @@ cmd_install() {
     cp "$0" "$dest"
     chmod +x "$dest"
     ensure_files
-    echo "已安装到：$dest"
-    echo "下一步：port-traffic-stat install-deps && port-traffic-stat add 80 443"
+    echo "installed to: $dest"
 }
 
 cmd_install_service() {
@@ -438,12 +772,7 @@ cmd_install_service() {
     if command -v rc-update >/dev/null 2>&1 && [ -d /etc/init.d ]; then
         cat > /etc/init.d/port-traffic-stat <<'EOF'
 #!/sbin/openrc-run
-description="Restore and save port traffic nftables counters"
-
-depend() {
-    need localmount
-    after firewall
-}
+description="Restore and save port traffic nftables counters and quotas"
 
 start() {
     ebegin "Restoring port traffic stat rules"
@@ -459,15 +788,14 @@ stop() {
 EOF
         chmod +x /etc/init.d/port-traffic-stat
         rc-update add port-traffic-stat default
-        echo "已安装 OpenRC 服务：port-traffic-stat"
-        echo "启动：rc-service port-traffic-stat start"
+        echo "OpenRC service installed: port-traffic-stat"
         return 0
     fi
 
     if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
         cat > /etc/systemd/system/port-traffic-stat.service <<'EOF'
 [Unit]
-Description=Restore and save port traffic nftables counters
+Description=Restore and save port traffic nftables counters and quotas
 After=network-pre.target
 
 [Service]
@@ -481,12 +809,11 @@ WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
         systemctl enable port-traffic-stat.service
-        echo "已安装 systemd 服务：port-traffic-stat.service"
-        echo "启动：systemctl start port-traffic-stat"
+        echo "systemd service installed: port-traffic-stat.service"
         return 0
     fi
 
-    die "未识别 OpenRC 或 systemd，无法自动安装启动服务"
+    die "OpenRC/systemd not found"
 }
 
 cmd_uninstall() {
@@ -502,44 +829,46 @@ cmd_uninstall() {
         systemctl daemon-reload >/dev/null 2>&1 || true
     fi
     rm -f /usr/local/bin/port-traffic-stat
-    echo "已卸载程序和启动服务；统计数据目录仍保留：$CONFIG_DIR"
+    echo "uninstalled program and startup service; data kept in: $CONFIG_DIR"
 }
 
 usage() {
     cat <<EOF
 port-traffic-stat v$VERSION
 
-用途：
-  用 nftables 统计指定 TCP/UDP 端口的入站、出站和总流量。
-  兼容 Alpine Linux，脚本使用 /bin/sh，不依赖 bash/jq/bc。
+Usage:
+  $0 install-deps
+  $0 install
+  $0 install-service
 
-用法：
-  $0 install-deps                 安装 nftables，Alpine 下使用 apk
-  $0 install                      安装脚本到 /usr/local/bin/port-traffic-stat
-  $0 install-service              安装开机恢复服务，Alpine 下为 OpenRC
+  $0 add 80 443 10000-10100
+  $0 del 80
+  $0 status
+  $0 watch [seconds]
+  $0 reset [PORT|all]
 
-  $0 add 80 443 10000-10100       添加统计端口/端口段
-  $0 del 80                       删除统计端口
-  $0 status                       查看统计
-  $0 watch [秒]                   循环查看统计，默认 2 秒刷新
-  $0 reset [端口|all]             清零统计，默认 all
-  $0 save                         保存当前计数并重载规则
-  $0 restore                      重新加载 nftables 统计规则
-  $0 flush                        卸载 nftables 统计规则但保留历史统计
-  $0 uninstall                    卸载脚本和启动服务，保留 $CONFIG_DIR
+Traffic quota / auto pause:
+  $0 limit PORT SIZE          Set total IN+OUT limit, auto drop traffic after reached
+  $0 limit set PORT SIZE      Same as above
+  $0 limit del PORT           Remove limit and resume unrestricted traffic
+  $0 limit list               Show limits
+  $0 unlimit PORT             Alias of limit del
+  $0 resume PORT|all          Reset usage to 0 and resume traffic, keeping limits
 
-说明：
-  IN    = dport 命中该端口的流量，包含 input/forward 链
-  OUT   = sport 命中该端口的流量，包含 output/forward 链
-  TOTAL = IN + OUT
+Size examples:
+  500M, 10G, 1T, 1073741824
 
-Alpine 快速开始：
-  chmod +x $0
-  doas ./$0 install-deps          # 或 sudo / 直接 root
-  doas ./$0 install
-  doas port-traffic-stat install-service
-  doas port-traffic-stat add 80 443
-  port-traffic-stat status
+Other:
+  $0 save
+  $0 restore
+  $0 flush
+  $0 uninstall
+
+Examples:
+  $0 add 80 443
+  $0 limit 80 10G
+  $0 status
+  $0 resume 80
 EOF
 }
 
@@ -553,6 +882,9 @@ main() {
         status|show|list) print_status ;;
         watch) cmd_watch "$@" ;;
         reset) cmd_reset "$@" ;;
+        limit|quota) cmd_limit "$@" ;;
+        unlimit) cmd_unlimit "$@" ;;
+        resume|unpause) cmd_resume "$@" ;;
         save) cmd_save ;;
         restore|reload|init) cmd_restore ;;
         flush|stop) cmd_flush ;;

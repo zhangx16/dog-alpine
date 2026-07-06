@@ -10,6 +10,7 @@ SCRIPT_URL="${SCRIPT_URL:-$RAW_BASE/port-traffic-stat.sh}"
 INSTALL_PATH="${INSTALL_PATH:-/usr/local/bin/port-traffic-stat}"
 INSTALL_DEPS=1
 INSTALL_SERVICE=1
+LIMIT_SIZE=""
 PORTS=""
 
 die() {
@@ -28,14 +29,19 @@ Examples:
   sh install.sh
   sh install.sh 80 443
   sh install.sh 80,443,10000-10100
-  sh install.sh --no-service 80 443
+  sh install.sh --limit 10G 80 443
+  sh install.sh --no-service --limit 500M 10000-10100
 
 Options:
+  --limit SIZE    Set total IN+OUT traffic limit for each installed port
   --no-deps       Do not install nftables/curl packages
   --no-service    Do not install OpenRC/systemd startup service
   --branch NAME   Download from another Git branch
   --url URL       Download port-traffic-stat.sh from a custom URL
   -h, --help      Show this help
+
+Size examples:
+  500M, 10G, 1T, 1073741824
 
 Environment:
   REPO=owner/repo
@@ -75,7 +81,7 @@ install_deps() {
         return 0
     fi
 
-    echo "未识别包管理器，请手动安装 nftables 和 curl/wget。" >&2
+    echo "Unknown package manager; please install nftables and curl/wget manually." >&2
 }
 
 download_file() {
@@ -95,9 +101,24 @@ download_file() {
     die "curl/wget not found"
 }
 
+for_each_port_arg() {
+    for x in $PORTS; do
+        printf '%s\n' "$x" | tr ',' '\n' | while IFS= read -r p; do
+            [ -n "$p" ] || continue
+            printf '%s\n' "$p"
+        done
+    done
+}
+
 parse_args() {
     while [ "$#" -gt 0 ]; do
         case "$1" in
+            --limit)
+                shift
+                [ "$#" -gt 0 ] || die "--limit requires a value"
+                LIMIT_SIZE=$1
+                shift
+                ;;
             --no-deps)
                 INSTALL_DEPS=0
                 shift
@@ -163,26 +184,32 @@ main() {
     echo "Installed: $INSTALL_PATH"
 
     if [ "$INSTALL_SERVICE" = "1" ]; then
-        "$INSTALL_PATH" install-service || echo "启动服务安装失败或当前系统不支持，已跳过。"
+        "$INSTALL_PATH" install-service || echo "Startup service installation skipped or unsupported."
     fi
 
     if [ -n "$PORTS" ]; then
         # Intentionally split user supplied port list by spaces.
         # shellcheck disable=SC2086
         "$INSTALL_PATH" add $PORTS
+        if [ -n "$LIMIT_SIZE" ]; then
+            for p in $(for_each_port_arg); do
+                "$INSTALL_PATH" limit "$p" "$LIMIT_SIZE"
+            done
+        fi
     else
         "$INSTALL_PATH" restore || true
     fi
 
     cat <<EOF
 
-安装完成。
+Installation completed.
 
-常用命令：
+Common commands:
   port-traffic-stat add 80 443
+  port-traffic-stat limit 80 10G
   port-traffic-stat status
   port-traffic-stat watch 2
-  port-traffic-stat reset all
+  port-traffic-stat resume 80
 
 EOF
 }
