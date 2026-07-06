@@ -110,7 +110,44 @@ systemctl daemon-reload
 systemctl enable --now port-traffic-stat
 ```
 
-## 基础使用
+## 交互式菜单
+
+直接运行：
+
+```sh
+port-traffic-stat
+```
+
+或：
+
+```sh
+port-traffic-stat menu
+```
+
+会进入数字菜单，可通过输入数字执行常用功能：
+
+```text
+1) Add/Set ports              添加统计端口
+2) Set port traffic limit     设置端口限额
+3) Show status                查看状态
+4) Show limits                查看限额
+5) Delete ports               删除端口
+6) Remove port limit          删除限额
+7) Resume paused port         恢复端口流量
+8) Reset statistics           清零统计
+9) Restore nftables rules     恢复规则
+10) Install dependencies      安装依赖
+11) Install script            安装脚本
+12) Install boot service      安装开机服务
+13) Update script             更新脚本
+14) Uninstall script/service  卸载脚本/服务
+15) Watch status              实时查看状态
+0) Exit                       退出
+```
+
+原有命令行方式仍然保留，适合脚本化调用。
+
+## 命令行使用
 
 添加统计端口：
 

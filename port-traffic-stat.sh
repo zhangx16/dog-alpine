@@ -3,8 +3,9 @@
 # Alpine/Debian-friendly nftables port traffic statistics with optional per-port quota blocking.
 
 set -eu
+set -f
 
-VERSION="1.2.1"
+VERSION="1.3.0"
 FAMILY="inet"
 TABLE="port_traffic_stat"
 CONFIG_DIR="${PTS_CONFIG_DIR:-/etc/port-traffic-stat}"
@@ -13,6 +14,7 @@ STATE_FILE="$CONFIG_DIR/state"
 LIMITS_FILE="$CONFIG_DIR/limits"
 USED_FILE="$CONFIG_DIR/used"
 LOCK_DIR="/tmp/port-traffic-stat.lock"
+UPDATE_URL="${PTS_UPDATE_URL:-https://raw.githubusercontent.com/zhangx16/dog-alpine/main/port-traffic-stat.sh}"
 
 umask 022
 
@@ -761,10 +763,39 @@ cmd_install_deps() {
 cmd_install() {
     need_root
     dest="/usr/local/bin/port-traffic-stat"
-    cp "$0" "$dest"
+    src=$0
+    case "$src" in
+        */*) ;;
+        *) src=$(command -v "$0" 2>/dev/null || printf '%s\n' "$0") ;;
+    esac
+    if [ "$src" != "$dest" ]; then
+        cp "$src" "$dest"
+    fi
     chmod +x "$dest"
     ensure_files
     echo "installed to: $dest"
+}
+
+cmd_update() {
+    need_root
+    url=${1:-$UPDATE_URL}
+    dest="/usr/local/bin/port-traffic-stat"
+    tmp="${TMPDIR:-/tmp}/port-traffic-stat.update.$$"
+    trap 'rm -f "$tmp" 2>/dev/null || true' EXIT INT TERM
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$url?ts=$(date +%s)" -o "$tmp"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$tmp" "$url?ts=$(date +%s)"
+    else
+        die "curl/wget not found, run: $0 install-deps"
+    fi
+
+    /bin/sh -n "$tmp" || die "downloaded script syntax check failed"
+    cp "$tmp" "$dest"
+    chmod +x "$dest"
+    echo "updated: $dest"
+    "$dest" version 2>/dev/null || true
 }
 
 cmd_install_service() {
@@ -884,6 +915,162 @@ cmd_uninstall() {
     echo "uninstalled program and startup service; data kept in: $CONFIG_DIR"
 }
 
+menu_pause() {
+    printf '\nPress Enter to continue...'
+    IFS= read -r menu_pause_input || true
+}
+
+menu_prompt() {
+    printf '%s' "$1"
+    IFS= read -r menu_answer || return 1
+    menu_answer=$(printf '%s' "$menu_answer" | tr -d '\r')
+    return 0
+}
+
+menu_run() {
+    (
+        "$@"
+    )
+    menu_rc=$?
+    if [ "$menu_rc" -ne 0 ]; then
+        echo "Command failed, exit code: $menu_rc"
+    fi
+}
+
+menu_confirm() {
+    menu_prompt "$1 [y/N]: " || return 1
+    case "$menu_answer" in
+        y|Y|yes|YES) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+cmd_menu() {
+    while :; do
+        if [ -t 1 ]; then
+            clear 2>/dev/null || true
+        fi
+        cat <<EOF
+port-traffic-stat v$VERSION
+
+1) Add/Set ports              添加统计端口
+2) Set port traffic limit     设置端口限额
+3) Show status                查看状态
+4) Show limits                查看限额
+5) Delete ports               删除端口
+6) Remove port limit          删除限额
+7) Resume paused port         恢复端口流量
+8) Reset statistics           清零统计
+9) Restore nftables rules     恢复规则
+10) Install dependencies      安装依赖
+11) Install script            安装脚本
+12) Install boot service      安装开机服务
+13) Update script             更新脚本
+14) Uninstall script/service  卸载脚本/服务
+15) Watch status              实时查看状态
+0) Exit                       退出
+
+EOF
+        menu_prompt "Select an option / 输入数字: " || exit 0
+        case "$menu_answer" in
+            1)
+                menu_prompt "Ports, e.g. 80 443 10000-10100: " || continue
+                [ -n "$menu_answer" ] || { echo "No ports entered."; menu_pause; continue; }
+                menu_run cmd_add $menu_answer
+                menu_pause
+                ;;
+            2)
+                menu_prompt "Port, e.g. 44001: " || continue
+                menu_port_input=$menu_answer
+                [ -n "$menu_port_input" ] || { echo "No port entered."; menu_pause; continue; }
+                menu_prompt "Limit, e.g. 100G / 500M / 1T: " || continue
+                menu_limit_input=$menu_answer
+                [ -n "$menu_limit_input" ] || { echo "No limit entered."; menu_pause; continue; }
+                menu_run cmd_limit "$menu_port_input" "$menu_limit_input"
+                menu_pause
+                ;;
+            3)
+                menu_run print_status
+                menu_pause
+                ;;
+            4)
+                menu_run cmd_limit list
+                menu_pause
+                ;;
+            5)
+                menu_prompt "Ports to delete, e.g. 80 443: " || continue
+                [ -n "$menu_answer" ] || { echo "No ports entered."; menu_pause; continue; }
+                menu_run cmd_del $menu_answer
+                menu_pause
+                ;;
+            6)
+                menu_prompt "Ports to remove limit, e.g. 80 443: " || continue
+                [ -n "$menu_answer" ] || { echo "No ports entered."; menu_pause; continue; }
+                menu_run cmd_unlimit $menu_answer
+                menu_pause
+                ;;
+            7)
+                menu_prompt "Ports to resume, or all [all]: " || continue
+                menu_resume_input=${menu_answer:-all}
+                menu_run cmd_resume $menu_resume_input
+                menu_pause
+                ;;
+            8)
+                menu_prompt "Ports to reset, or all [all]: " || continue
+                menu_reset_input=${menu_answer:-all}
+                menu_run cmd_reset $menu_reset_input
+                menu_pause
+                ;;
+            9)
+                menu_run cmd_restore
+                menu_pause
+                ;;
+            10)
+                menu_run cmd_install_deps
+                menu_pause
+                ;;
+            11)
+                menu_run cmd_install
+                menu_pause
+                ;;
+            12)
+                menu_run cmd_install_service
+                menu_pause
+                ;;
+            13)
+                menu_run cmd_update
+                menu_pause
+                ;;
+            14)
+                if menu_confirm "Uninstall script and service?"; then
+                    menu_run cmd_uninstall
+                else
+                    echo "Cancelled."
+                fi
+                menu_pause
+                ;;
+            15)
+                menu_prompt "Refresh interval seconds [2]: " || continue
+                menu_watch_interval=${menu_answer:-2}
+                echo "Press Ctrl+C to stop watching."
+                menu_run cmd_watch "$menu_watch_interval"
+                menu_pause
+                ;;
+            0|q|Q|exit|quit)
+                exit 0
+                ;;
+            h|H|help|-h|--help)
+                usage
+                menu_pause
+                ;;
+            *)
+                echo "Invalid option: $menu_answer"
+                menu_pause
+                ;;
+        esac
+    done
+}
+
 usage() {
     cat <<EOF
 port-traffic-stat v$VERSION
@@ -893,9 +1080,13 @@ Supported systems:
   Debian/Ubuntu with systemd or SysV init
 
 Usage:
+  $0                             Interactive menu
+  $0 menu                        Interactive menu
+
   $0 install-deps
   $0 install
   $0 install-service
+  $0 update
 
   $0 add 80 443 10000-10100
   $0 del 80
@@ -929,10 +1120,15 @@ EOF
 }
 
 main() {
-    cmd=${1:-help}
-    shift || true
+    if [ "$#" -gt 0 ]; then
+        cmd=$1
+        shift
+    else
+        cmd=menu
+    fi
 
     case "$cmd" in
+        menu|interactive|ui) cmd_menu ;;
         add) cmd_add "$@" ;;
         del|delete|remove) cmd_del "$@" ;;
         status|show|list) print_status ;;
@@ -947,6 +1143,7 @@ main() {
         install-deps) cmd_install_deps ;;
         install) cmd_install ;;
         install-service) cmd_install_service ;;
+        update|self-update) cmd_update "$@" ;;
         uninstall) cmd_uninstall ;;
         version|-v|--version) echo "$VERSION" ;;
         help|-h|--help) usage ;;

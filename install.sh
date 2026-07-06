@@ -207,6 +207,7 @@ main() {
 Installation completed.
 
 Common commands:
+  port-traffic-stat
   port-traffic-stat add 80 443
   port-traffic-stat limit 80 10G
   port-traffic-stat status
